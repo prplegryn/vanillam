@@ -11,6 +11,7 @@ class CircuitScenePainter extends CustomPainter {
     required this.project,
     required this.snapshot,
     required this.selectedId,
+    required this.pendingPort,
     required this.animationValue,
     required this.showParticles,
     required this.showHeatmap,
@@ -19,6 +20,7 @@ class CircuitScenePainter extends CustomPainter {
   final CircuitProject project;
   final SimulationSnapshot snapshot;
   final String? selectedId;
+  final PortRef? pendingPort;
   final double animationValue;
   final bool showParticles;
   final bool showHeatmap;
@@ -109,7 +111,11 @@ class CircuitScenePainter extends CustomPainter {
       ..color = const Color(0x172446A6);
 
     for (final wire in project.wires) {
-      final path = _pathFor(wire.points);
+      final points = project.resolvedWirePoints(wire);
+      if (points.length < 2) {
+        continue;
+      }
+      final path = _pathFor(points);
       canvas.drawPath(path, shadow);
       canvas.drawPath(path, wirePaint);
     }
@@ -122,11 +128,14 @@ class CircuitScenePainter extends CustomPainter {
           _paintBattery(canvas, component);
         case ComponentType.ground:
           _paintGround(canvas, component);
-        case ComponentType.wireTool:
-          break;
         case ComponentType.switchSpst:
+        case ComponentType.pushButtonNo:
+        case ComponentType.pushButtonNc:
           _paintSwitch(canvas, component);
         case ComponentType.resistor:
+        case ComponentType.variableResistor:
+        case ComponentType.ldr:
+        case ComponentType.ntc:
           _paintResistor(canvas, component);
         case ComponentType.led:
           _paintLed(canvas, component);
@@ -136,6 +145,8 @@ class CircuitScenePainter extends CustomPainter {
           _paintProbe(canvas, component, 'V');
         case ComponentType.currentProbe:
           _paintProbe(canvas, component, 'A');
+        default:
+          _paintGenericComponent(canvas, component);
       }
     }
   }
@@ -187,8 +198,8 @@ class CircuitScenePainter extends CustomPainter {
       ..strokeCap = StrokeCap.round
       ..color = component.enabled ? _wireColor : _mutedInk;
     final c = component.position;
-    final left = c.translate(-34, 0);
-    final right = c.translate(34, 0);
+    final left = c.translate(-48, 0);
+    final right = c.translate(48, 0);
     canvas.drawCircle(left, 6, Paint()..color = _wireColor);
     canvas.drawCircle(right, 6, Paint()..color = _wireColor);
     canvas.drawLine(left, component.enabled ? right : c.translate(18, -27), p);
@@ -306,6 +317,39 @@ class CircuitScenePainter extends CustomPainter {
     _drawText(canvas, label, c.translate(0, -1), color: const Color(0xFF1F5EFF), weight: FontWeight.w800, size: 17, align: TextAlign.center);
   }
 
+  void _paintGenericComponent(Canvas canvas, CircuitComponent component) {
+    if (component.type == ComponentType.wireTool ||
+        component.type == ComponentType.voltageHeatmap ||
+        component.type == ComponentType.currentArrows) {
+      return;
+    }
+    final rect = Rect.fromCenter(center: component.position, width: 96, height: 56);
+    final roleColor = _roleColor(component.spec.role);
+    canvas.drawRRect(
+      RRect.fromRectAndRadius(rect, const Radius.circular(14)),
+      Paint()..color = roleColor.withValues(alpha: 0.09),
+    );
+    canvas.drawRRect(
+      RRect.fromRectAndRadius(rect, const Radius.circular(14)),
+      Paint()
+        ..style = PaintingStyle.stroke
+        ..strokeWidth = 2
+        ..color = roleColor,
+    );
+    _drawText(
+      canvas,
+      component.type.label,
+      component.position,
+      color: _ink,
+      weight: FontWeight.w800,
+      size: 13,
+      align: TextAlign.center,
+    );
+    for (final port in component.spec.ports) {
+      _drawPort(canvas, component.position + port.localPosition);
+    }
+  }
+
   void _paintMeasurementLabels(Canvas canvas) {
     if (!snapshot.running) {
       return;
@@ -352,7 +396,7 @@ class CircuitScenePainter extends CustomPainter {
     final particlePaint = Paint()..color = snapshot.hasError ? const Color(0xFFFFCDD2) : const Color(0xFFFFC857);
     final count = (snapshot.currentMilliAmps / 3).clamp(3, 10).round();
     for (final wire in project.wires) {
-      final points = wire.points;
+      final points = project.resolvedWirePoints(wire);
       for (var i = 0; i < count; i++) {
         final t = (animationValue + i / count) % 1;
         final pos = _pointAlongPolyline(points, t);
@@ -364,17 +408,30 @@ class CircuitScenePainter extends CustomPainter {
   // Layer 4: interaction aids, selection, and snap/port affordances.
   void _paintInteractionLayer(Canvas canvas) {
     final selected = selectedId == null ? null : project.componentById(selectedId!);
-    if (selected == null) {
-      return;
+    if (selected != null) {
+      final paint = Paint()
+        ..style = PaintingStyle.stroke
+        ..strokeWidth = 2
+        ..color = const Color(0xFF1F5EFF);
+      final rect = Rect.fromCenter(center: selected.position, width: 122, height: 92);
+      canvas.drawRRect(RRect.fromRectAndRadius(rect, const Radius.circular(18)), paint);
+      for (final port in selected.spec.ports) {
+        _drawPort(canvas, selected.position + port.localPosition);
+      }
     }
-    final paint = Paint()
-      ..style = PaintingStyle.stroke
-      ..strokeWidth = 2
-      ..color = const Color(0xFF1F5EFF);
-    final rect = Rect.fromCenter(center: selected.position, width: 112, height: 88);
-    canvas.drawRRect(RRect.fromRectAndRadius(rect, const Radius.circular(18)), paint);
-    _drawPort(canvas, selected.position.translate(-52, 0));
-    _drawPort(canvas, selected.position.translate(52, 0));
+
+    final pending = pendingPort == null ? null : project.portPosition(pendingPort!);
+    if (pending != null) {
+      canvas.drawCircle(pending, 14, Paint()..color = const Color(0x331F5EFF));
+      canvas.drawCircle(
+        pending,
+        14,
+        Paint()
+          ..style = PaintingStyle.stroke
+          ..strokeWidth = 2
+          ..color = const Color(0xFF1F5EFF),
+      );
+    }
   }
 
   void _drawTerminalDots(Canvas canvas, Offset a, Offset b) {
@@ -437,6 +494,37 @@ class CircuitScenePainter extends CustomPainter {
     return null;
   }
 
+  Color _roleColor(SimulationRole role) {
+    switch (role) {
+      case SimulationRole.voltageSource:
+      case SimulationRole.currentSource:
+        return const Color(0xFFE53935);
+      case SimulationRole.resistor:
+      case SimulationRole.variableResistor:
+      case SimulationRole.potentiometer:
+        return const Color(0xFFE36C0A);
+      case SimulationRole.led:
+      case SimulationRole.lamp:
+      case SimulationRole.motor:
+        return const Color(0xFF1B7F45);
+      case SimulationRole.meter:
+      case SimulationRole.visualizer:
+        return const Color(0xFF1F5EFF);
+      case SimulationRole.digital:
+      case SimulationRole.module:
+      case SimulationRole.transistor:
+      case SimulationRole.mosfet:
+        return const Color(0xFF6F42C1);
+      case SimulationRole.conductor:
+      case SimulationRole.reference:
+      case SimulationRole.switcher:
+      case SimulationRole.capacitor:
+      case SimulationRole.inductor:
+      case SimulationRole.diode:
+        return const Color(0xFF52657F);
+    }
+  }
+
   void _drawText(
     Canvas canvas,
     String text,
@@ -477,6 +565,7 @@ class CircuitScenePainter extends CustomPainter {
     return oldDelegate.project != project ||
         oldDelegate.snapshot != snapshot ||
         oldDelegate.selectedId != selectedId ||
+        oldDelegate.pendingPort != pendingPort ||
         oldDelegate.animationValue != animationValue ||
         oldDelegate.showParticles != showParticles ||
         oldDelegate.showHeatmap != showHeatmap;

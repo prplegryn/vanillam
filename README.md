@@ -6,9 +6,10 @@ The current scope follows the design document in this repository:
 
 - Flutter app shell with Material UI.
 - Canvas-first workbench using `CustomPainter` instead of widget-per-wire rendering.
-- MVP 0.1 components: battery, GND, wire, switch, resistor, LED, bulb, voltage/current probes.
-- Simplified local DC simulation for the LED current-limiting lesson.
-- Diagnostics that explain open circuit, over-current, and normal current flow.
+- Document-scale component catalog with 45 component specs, ports, default parameters, teaching notes, and MVP/advanced/later stages.
+- Port-based wires, component anchors, graph-built nets, and graph-driven DC path diagnostics for the LED current-limiting lesson.
+- Diagnostics that explain open circuit, invalid wires, source short, over-current, missing ground, and normal current flow.
+- Interactive port-to-port wire creation, component dragging, undo/redo, and dynamic lesson validation.
 - GitHub Actions Android release build with a fixed committed signing key.
 
 ## Build

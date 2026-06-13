@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 
 import '../domain/circuit_models.dart';
+import '../domain/lesson.dart';
 import '../domain/simulation.dart';
 import '../i18n/strings.dart';
 import 'circuit_painter.dart';
@@ -20,8 +21,13 @@ class _WorkbenchPageState extends State<WorkbenchPage> with SingleTickerProvider
   bool _showParticles = true;
   bool _showHeatmap = true;
   String? _selectedId = 'led-1';
+  PortRef? _pendingPort;
   String _componentFilter = '';
   String? _draggingId;
+  CircuitProject? _dragStartProject;
+  bool _dragMoved = false;
+  final _undoStack = <CircuitProject>[];
+  final _redoStack = <CircuitProject>[];
 
   SimulationSnapshot get _snapshot => _simulator.solve(_project, running: _running);
 
@@ -66,6 +72,8 @@ class _WorkbenchPageState extends State<WorkbenchPage> with SingleTickerProvider
           onToggleRun: _toggleRun,
           onDiagnostics: () => _showDiagnosticsSheet(snapshot),
           onLesson: _showLessonSheet,
+          onUndo: _undoStack.isEmpty ? null : _undo,
+          onRedo: _redoStack.isEmpty ? null : _redo,
         ),
         Expanded(
           child: Padding(
@@ -96,6 +104,8 @@ class _WorkbenchPageState extends State<WorkbenchPage> with SingleTickerProvider
           onToggleRun: _toggleRun,
           onDiagnostics: () => _showDiagnosticsSheet(snapshot),
           onLesson: _showLessonSheet,
+          onUndo: _undoStack.isEmpty ? null : _undo,
+          onRedo: _redoStack.isEmpty ? null : _redo,
         ),
         Expanded(
           child: Row(
@@ -156,10 +166,10 @@ class _WorkbenchPageState extends State<WorkbenchPage> with SingleTickerProvider
                 height: _project.viewport.height,
                 child: GestureDetector(
                   behavior: HitTestBehavior.opaque,
-                  onTapDown: (details) => _selectNearest(details.localPosition),
+                  onTapDown: (details) => _handleCanvasTap(details.localPosition),
                   onPanStart: (details) => _startDrag(details.localPosition),
                   onPanUpdate: (details) => _updateDrag(details.delta),
-                  onPanEnd: (_) => setState(() => _draggingId = null),
+                  onPanEnd: (_) => _finishDrag(),
                   child: AnimatedBuilder(
                     animation: _animation,
                     builder: (context, _) {
@@ -168,6 +178,7 @@ class _WorkbenchPageState extends State<WorkbenchPage> with SingleTickerProvider
                           project: _project,
                           snapshot: snapshot,
                           selectedId: _selectedId,
+                          pendingPort: _pendingPort,
                           animationValue: _animation.value,
                           showParticles: _showParticles,
                           showHeatmap: _showHeatmap,
@@ -210,7 +221,38 @@ class _WorkbenchPageState extends State<WorkbenchPage> with SingleTickerProvider
     setState(() => _running = !_running);
   }
 
-  void _selectNearest(Offset localPosition) {
+  void _handleCanvasTap(Offset localPosition) {
+    final port = _project.nearestPort(localPosition);
+    if (port != null) {
+      _handlePortTap(port);
+      return;
+    }
+    _selectNearestComponent(localPosition);
+  }
+
+  void _handlePortTap(PortAnchor anchor) {
+    final pending = _pendingPort;
+    if (pending == null) {
+      setState(() {
+        _pendingPort = anchor.ref;
+        _selectedId = anchor.component.id;
+      });
+      return;
+    }
+
+    if (pending == anchor.ref) {
+      setState(() => _pendingPort = null);
+      return;
+    }
+
+    _commitProject(_project.addWire(pending, anchor.ref));
+    setState(() {
+      _pendingPort = null;
+      _selectedId = anchor.component.id;
+    });
+  }
+
+  void _selectNearestComponent(Offset localPosition) {
     CircuitComponent? nearest;
     var nearestDistance = double.infinity;
     for (final component in _project.components) {
@@ -220,10 +262,18 @@ class _WorkbenchPageState extends State<WorkbenchPage> with SingleTickerProvider
         nearestDistance = distance;
       }
     }
-    setState(() => _selectedId = nearest?.id);
+    setState(() {
+      _selectedId = nearest?.id;
+      if (nearest == null) {
+        _pendingPort = null;
+      }
+    });
   }
 
   void _startDrag(Offset localPosition) {
+    if (_project.nearestPort(localPosition, maxDistance: 30) != null) {
+      return;
+    }
     CircuitComponent? nearest;
     var nearestDistance = double.infinity;
     for (final component in _project.components) {
@@ -237,6 +287,8 @@ class _WorkbenchPageState extends State<WorkbenchPage> with SingleTickerProvider
       setState(() {
         _selectedId = nearest!.id;
         _draggingId = nearest.id;
+        _dragStartProject = _project;
+        _dragMoved = false;
       });
     }
   }
@@ -251,7 +303,23 @@ class _WorkbenchPageState extends State<WorkbenchPage> with SingleTickerProvider
       return;
     }
     final snapped = _snap(component.position + delta);
-    setState(() => _project = _project.replaceComponent(component.copyWith(position: snapped)));
+    setState(() {
+      _project = _project.replaceComponent(component.copyWith(position: snapped));
+      _dragMoved = true;
+    });
+  }
+
+  void _finishDrag() {
+    final before = _dragStartProject;
+    if (_dragMoved && before != null) {
+      _undoStack.add(before);
+      _redoStack.clear();
+    }
+    setState(() {
+      _draggingId = null;
+      _dragStartProject = null;
+      _dragMoved = false;
+    });
   }
 
   Offset _snap(Offset position) {
@@ -260,14 +328,62 @@ class _WorkbenchPageState extends State<WorkbenchPage> with SingleTickerProvider
   }
 
   void _addComponent(ComponentType type) {
+    if (type == ComponentType.wireTool) {
+      setState(() => _pendingPort = null);
+      return;
+    }
+    if (type == ComponentType.voltageHeatmap) {
+      setState(() => _showHeatmap = !_showHeatmap);
+      return;
+    }
+    if (type == ComponentType.currentArrows) {
+      setState(() => _showParticles = !_showParticles);
+      return;
+    }
+    final updated = _project.addComponent(type);
+    _commitProject(updated);
     setState(() {
-      _project = _project.addComponent(type);
       _selectedId = _project.components.last.id;
     });
   }
 
   void _updateSelectedComponent(CircuitComponent component) {
-    setState(() => _project = _project.replaceComponent(component));
+    _commitProject(_project.replaceComponent(component));
+  }
+
+  void _commitProject(CircuitProject updated) {
+    if (identical(updated, _project)) {
+      return;
+    }
+    _undoStack.add(_project);
+    _redoStack.clear();
+    setState(() => _project = updated);
+  }
+
+  void _undo() {
+    if (_undoStack.isEmpty) {
+      return;
+    }
+    final previous = _undoStack.removeLast();
+    _redoStack.add(_project);
+    setState(() {
+      _project = previous;
+      _selectedId = previous.components.isEmpty ? null : previous.components.last.id;
+      _pendingPort = null;
+    });
+  }
+
+  void _redo() {
+    if (_redoStack.isEmpty) {
+      return;
+    }
+    final next = _redoStack.removeLast();
+    _undoStack.add(_project);
+    setState(() {
+      _project = next;
+      _selectedId = next.components.isEmpty ? null : next.components.last.id;
+      _pendingPort = null;
+    });
   }
 
   void _showDiagnosticsSheet(SimulationSnapshot snapshot) {
@@ -310,24 +426,30 @@ class _WorkbenchPageState extends State<WorkbenchPage> with SingleTickerProvider
   }
 
   void _showLessonSheet() {
+    final progress = LessonValidator.validate(_project, _snapshot);
     showModalBottomSheet<void>(
       context: context,
       showDragHandle: true,
       builder: (context) {
-        return const SafeArea(
+        return SafeArea(
           child: Padding(
-            padding: EdgeInsets.fromLTRB(20, 0, 20, 24),
+            padding: const EdgeInsets.fromLTRB(20, 0, 20, 24),
             child: Column(
               mainAxisSize: MainAxisSize.min,
               crossAxisAlignment: CrossAxisAlignment.start,
               children: <Widget>[
-                Text(Strings.lessonTitle, style: TextStyle(fontSize: 20, fontWeight: FontWeight.w800)),
-                SizedBox(height: 10),
-                Text(Strings.lessonGoal),
-                SizedBox(height: 14),
-                _LessonStep(index: 1, text: '确认电池、开关、电阻和 LED 组成闭合回路。'),
-                _LessonStep(index: 2, text: '运行仿真，观察导线上的电流粒子方向。'),
-                _LessonStep(index: 3, text: '调整电阻，让 LED 电流保持在 20 mA 以下。'),
+                Text(progress.title, style: const TextStyle(fontSize: 20, fontWeight: FontWeight.w800)),
+                const SizedBox(height: 10),
+                Text(progress.goal),
+                const SizedBox(height: 10),
+                LinearProgressIndicator(value: progress.passedCount / progress.checks.length),
+                const SizedBox(height: 14),
+                for (var i = 0; i < progress.checks.length; i++)
+                  _LessonStep(
+                    index: i + 1,
+                    text: '${progress.checks[i].title}：${progress.checks[i].description}',
+                    passed: progress.checks[i].passed,
+                  ),
               ],
             ),
           ),
@@ -344,6 +466,8 @@ class _TopToolbar extends StatelessWidget {
     required this.onToggleRun,
     required this.onDiagnostics,
     required this.onLesson,
+    required this.onUndo,
+    required this.onRedo,
   });
 
   final bool running;
@@ -351,6 +475,8 @@ class _TopToolbar extends StatelessWidget {
   final VoidCallback onToggleRun;
   final VoidCallback onDiagnostics;
   final VoidCallback onLesson;
+  final VoidCallback? onUndo;
+  final VoidCallback? onRedo;
 
   @override
   Widget build(BuildContext context) {
@@ -375,8 +501,8 @@ class _TopToolbar extends StatelessWidget {
             ),
           ),
           const SizedBox(width: 8),
-          _ToolbarButton(label: '撤销', icon: Icons.undo, onPressed: () {}),
-          _ToolbarButton(label: '重做', icon: Icons.redo, onPressed: () {}),
+          _ToolbarButton(label: '撤销', icon: Icons.undo, onPressed: onUndo),
+          _ToolbarButton(label: '重做', icon: Icons.redo, onPressed: onRedo),
           _ToolbarButton(
             label: running ? '暂停' : '运行',
             icon: running ? Icons.pause_rounded : Icons.play_arrow_rounded,
@@ -407,7 +533,7 @@ class _ToolbarButton extends StatelessWidget {
 
   final String label;
   final IconData icon;
-  final VoidCallback onPressed;
+  final VoidCallback? onPressed;
   final bool filled;
   final bool warn;
 
@@ -456,22 +582,10 @@ class _ComponentDrawer extends StatelessWidget {
   final ValueChanged<ComponentType> onAdd;
   final bool compact;
 
-  static const _items = <ComponentType>[
-    ComponentType.battery,
-    ComponentType.ground,
-    ComponentType.wireTool,
-    ComponentType.switchSpst,
-    ComponentType.resistor,
-    ComponentType.led,
-    ComponentType.bulb,
-    ComponentType.voltageProbe,
-    ComponentType.currentProbe,
-  ];
-
   @override
   Widget build(BuildContext context) {
     final query = filter.trim().toLowerCase();
-    final items = _items.where((item) {
+    final items = ComponentCatalog.library.map((spec) => spec.type).where((item) {
       return query.isEmpty || item.label.toLowerCase().contains(query) || item.category.toLowerCase().contains(query);
     }).toList(growable: false);
 
@@ -601,6 +715,52 @@ class _ComponentTile extends StatelessWidget {
         return Icons.speed_rounded;
       case ComponentType.currentProbe:
         return Icons.electric_bolt_rounded;
+      case ComponentType.adjustableDcSupply:
+      case ComponentType.acSource:
+      case ComponentType.currentSource:
+      case ComponentType.dualSupply:
+      case ComponentType.pwmSource:
+        return Icons.power_rounded;
+      case ComponentType.node:
+      case ComponentType.openFault:
+      case ComponentType.netLabel:
+      case ComponentType.breadboard:
+        return Icons.hub_rounded;
+      case ComponentType.pushButtonNo:
+      case ComponentType.pushButtonNc:
+      case ComponentType.switchSpdt:
+      case ComponentType.fuse:
+        return Icons.settings_input_component_rounded;
+      case ComponentType.variableResistor:
+      case ComponentType.potentiometer:
+      case ComponentType.ldr:
+      case ComponentType.ntc:
+        return Icons.tune_rounded;
+      case ComponentType.capacitor:
+      case ComponentType.electrolyticCapacitor:
+      case ComponentType.inductor:
+        return Icons.waves_rounded;
+      case ComponentType.rgbLed:
+      case ComponentType.buzzer:
+      case ComponentType.dcMotor:
+        return Icons.toys_rounded;
+      case ComponentType.diode:
+      case ComponentType.zenerDiode:
+      case ComponentType.bridgeRectifier:
+      case ComponentType.transistorNpn:
+      case ComponentType.mosfetN:
+        return Icons.memory_rounded;
+      case ComponentType.multimeter:
+      case ComponentType.powerMeter:
+      case ComponentType.oscilloscope:
+      case ComponentType.voltageHeatmap:
+      case ComponentType.currentArrows:
+        return Icons.monitor_heart_rounded;
+      case ComponentType.logicAnd:
+      case ComponentType.opAmp:
+      case ComponentType.comparator:
+      case ComponentType.timer555:
+        return Icons.developer_board_rounded;
     }
   }
 }
@@ -919,10 +1079,11 @@ class _CanvasToggles extends StatelessWidget {
 }
 
 class _LessonStep extends StatelessWidget {
-  const _LessonStep({required this.index, required this.text});
+  const _LessonStep({required this.index, required this.text, this.passed = false});
 
   final int index;
   final String text;
+  final bool passed;
 
   @override
   Widget build(BuildContext context) {
@@ -933,8 +1094,10 @@ class _LessonStep extends StatelessWidget {
         children: <Widget>[
           CircleAvatar(
             radius: 13,
-            backgroundColor: Theme.of(context).colorScheme.primary,
-            child: Text('$index', style: const TextStyle(color: Colors.white, fontSize: 12, fontWeight: FontWeight.w800)),
+            backgroundColor: passed ? const Color(0xFF1B7F45) : Theme.of(context).colorScheme.primary,
+            child: passed
+                ? const Icon(Icons.check_rounded, color: Colors.white, size: 16)
+                : Text('$index', style: const TextStyle(color: Colors.white, fontSize: 12, fontWeight: FontWeight.w800)),
           ),
           const SizedBox(width: 10),
           Expanded(child: Text(text)),

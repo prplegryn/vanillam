@@ -1,5 +1,6 @@
 import 'dart:math' as math;
 
+import 'circuit_graph.dart';
 import 'circuit_models.dart';
 
 class DiagnosticMessage {
@@ -29,6 +30,10 @@ class SimulationSnapshot {
     required this.ledLit,
     required this.bulbLit,
     required this.resistorPowerWatts,
+    required this.netCount,
+    required this.branchCount,
+    required this.energizedComponentIds,
+    required this.branchCurrents,
     required this.diagnostics,
   });
 
@@ -41,6 +46,10 @@ class SimulationSnapshot {
   final bool ledLit;
   final bool bulbLit;
   final double resistorPowerWatts;
+  final int netCount;
+  final int branchCount;
+  final Set<String> energizedComponentIds;
+  final Map<String, double> branchCurrents;
   final List<DiagnosticMessage> diagnostics;
 
   double get currentMilliAmps => currentAmps * 1000;
@@ -52,31 +61,7 @@ class CircuitSimulator {
   const CircuitSimulator();
 
   SimulationSnapshot solve(CircuitProject project, {required bool running}) {
-    final battery = _first(project, ComponentType.battery);
-    final resistor = _first(project, ComponentType.resistor);
-    final led = _first(project, ComponentType.led);
-    final bulb = _first(project, ComponentType.bulb);
-    final switchSpst = _first(project, ComponentType.switchSpst);
-
-    final supplyVoltage = battery?.param('voltage', 5) ?? 0;
-    final resistance = resistor?.param('ohms', 220) ?? 0;
-    final ledVf = led?.param('vf', 2.1) ?? 0;
-    final maxLedMilliAmps = led?.param('maxMilliAmps', 20) ?? 20;
-    final switchClosed = switchSpst?.enabled ?? true;
-    final hasLoad = led != null || bulb != null;
-    final loopClosed = running && switchClosed && battery != null && hasLoad;
-
-    var current = 0.0;
-    if (loopClosed) {
-      if (resistance <= 0.5) {
-        current = supplyVoltage / 0.5;
-      } else {
-        final loadDrop = led == null ? 0 : ledVf;
-        current = math.max(0, (supplyVoltage - loadDrop) / resistance);
-      }
-    }
-
-    final resistorPower = current * current * math.max(resistance, 0);
+    final graph = CircuitGraph.fromProject(project);
     final diagnostics = <DiagnosticMessage>[];
 
     if (!running) {
@@ -84,91 +69,257 @@ class CircuitSimulator {
         const DiagnosticMessage(
           code: 'paused',
           title: '仿真暂停',
-          description: '点击运行后会计算节点电压、电流和功率。',
+          description: '点击运行后会根据端口、导线和网络重新计算电压、电流和功率。',
         ),
       );
-    } else if (!switchClosed) {
+      return _snapshot(
+        running: running,
+        graph: graph,
+        diagnostics: diagnostics,
+      );
+    }
+
+    if (graph.invalidWireIds.isNotEmpty) {
       diagnostics.add(
-        const DiagnosticMessage(
-          code: 'open-switch',
-          title: '回路断开',
-          description: '开关断开时没有闭合回路，LED 和灯泡都不会有持续电流。',
-          isWarning: true,
+        DiagnosticMessage(
+          code: 'invalid-wire',
+          title: '导线端点失效',
+          description: '有 ${graph.invalidWireIds.length} 根导线指向不存在的端口，请删除或重新连接。',
+          isError: true,
         ),
       );
-    } else if (battery == null) {
+    }
+
+    if (graph.voltageSources.isEmpty) {
       diagnostics.add(
         const DiagnosticMessage(
           code: 'missing-source',
           title: '缺少电源',
-          description: '电路需要至少一个电源来建立电位差。',
+          description: '电路需要至少一个电压源来建立电位差。',
           isError: true,
         ),
       );
-    } else if (!hasLoad) {
+      return _snapshot(running: running, graph: graph, diagnostics: diagnostics);
+    }
+
+    final source = graph.voltageSources.first;
+    if (source.positiveNet == source.negativeNet) {
       diagnostics.add(
         const DiagnosticMessage(
-          code: 'missing-load',
-          title: '缺少负载',
-          description: '加入 LED、灯泡或电阻负载后才能观察电能转换。',
+          code: 'source-short',
+          title: '电源短路',
+          description: '电源正负端处在同一网络，电流会急剧升高。请检查导线连接。',
+          isError: true,
+        ),
+      );
+      return _snapshot(
+        running: running,
+        graph: graph,
+        diagnostics: diagnostics,
+        supplyVoltage: source.voltage,
+      );
+    }
+
+    final path = graph.findPrimaryPath();
+    if (path == null) {
+      final hasOpenSwitch = project.components.any((component) {
+        return component.spec.role == SimulationRole.switcher && !component.enabled;
+      });
+      diagnostics.add(
+        DiagnosticMessage(
+          code: hasOpenSwitch ? 'open-switch' : 'open-circuit',
+          title: hasOpenSwitch ? '回路被开关断开' : '没有闭合回路',
+          description: hasOpenSwitch
+              ? '至少一个开关处于断开状态，电流无法从电源正端回到负端。'
+              : '导线尚未把电源、负载和返回路径连接成完整回路。',
           isWarning: true,
         ),
       );
-    } else if (resistance <= 0.5) {
+      if (!graph.hasGround) {
+        diagnostics.add(
+          const DiagnosticMessage(
+            code: 'missing-ground',
+            title: '缺少参考地',
+            description: '加入 GND 后，节点电压和探针读数会更容易解释。',
+            isWarning: true,
+          ),
+        );
+      }
+      return _snapshot(
+        running: running,
+        graph: graph,
+        diagnostics: diagnostics,
+        supplyVoltage: source.voltage,
+      );
+    }
+
+    final resistance = _pathResistance(path);
+    final fixedDrop = _pathForwardDrop(path);
+    final current = resistance <= 0.5 ? source.voltage / 0.5 : math.max(0, (source.voltage - fixedDrop) / resistance);
+    final energized = path.components.map((component) => component.id).toSet();
+    final branchCurrents = <String, double>{
+      for (final branch in path.branches) branch.component.id: current,
+    };
+    final led = _first(path, ComponentType.led);
+    final resistor = _first(path, ComponentType.resistor) ?? _first(path, ComponentType.variableResistor);
+    final bulb = _first(path, ComponentType.bulb);
+    final resistorPower = resistor == null ? 0 : current * current * _componentResistance(resistor);
+
+    if (resistance <= 0.5) {
       diagnostics.add(
         const DiagnosticMessage(
           code: 'short-circuit',
           title: '疑似短路',
-          description: '回路电阻过小，电流会急剧升高。请加入限流电阻。',
+          description: '闭合路径里的等效电阻过小，电流会急剧升高。请加入限流电阻或负载。',
           isError: true,
         ),
       );
-    } else if (led != null && current * 1000 > maxLedMilliAmps) {
+    }
+
+    if (led != null && current * 1000 > led.param('maxMilliAmps', 20)) {
       diagnostics.add(
         DiagnosticMessage(
           code: 'led-over-current',
           title: 'LED 过流',
           description:
-              '当前约 ${_format(current * 1000)} mA，超过 ${_format(maxLedMilliAmps)} mA。增大限流电阻可以降低电流。',
+              '当前约 ${_format(current * 1000)} mA，超过 ${_format(led.param('maxMilliAmps', 20))} mA。增大限流电阻可以降低电流。',
           isError: true,
         ),
       );
-    } else if (current <= 0.0001) {
+    }
+
+    if (!graph.hasGround) {
+      diagnostics.add(
+        const DiagnosticMessage(
+          code: 'missing-ground',
+          title: '缺少参考地',
+          description: '电路能计算电流，但节点电压缺少明确的 0V 参考。',
+          isWarning: true,
+        ),
+      );
+    }
+
+    if (current <= 0.0001 && diagnostics.every((message) => !message.isError)) {
       diagnostics.add(
         const DiagnosticMessage(
           code: 'no-forward-current',
           title: '没有明显电流',
-          description: '电源电压不足以让 LED 正向导通，或回路仍未闭合。',
+          description: '负载压降高于电源电压，或当前连接方向不满足导通条件。',
           isWarning: true,
         ),
       );
-    } else {
-      diagnostics.add(
+    }
+
+    if (diagnostics.isEmpty || diagnostics.every((message) => message.isWarning)) {
+      diagnostics.insert(
+        0,
         DiagnosticMessage(
           code: 'normal',
           title: '限流正常',
           description:
-              'LED 电流约 ${_format(current * 1000)} mA，电阻功率约 ${_format(resistorPower * 1000)} mW。',
+              '闭合路径包含 ${path.branches.length} 个支路，LED 电流约 ${_format(current * 1000)} mA，电阻功率约 ${_format(resistorPower * 1000)} mW。',
         ),
       );
     }
 
     return SimulationSnapshot(
       running: running,
-      loopClosed: loopClosed,
-      supplyVoltage: supplyVoltage,
+      loopClosed: true,
+      supplyVoltage: source.voltage,
       totalResistance: resistance,
       currentAmps: current,
-      ledForwardVoltage: ledVf,
-      ledLit: led != null && current > 0.002 && !diagnostics.any((d) => d.code == 'short-circuit'),
+      ledForwardVoltage: led?.param('vf', 2.1) ?? 0,
+      ledLit: led != null && current > 0.002 && diagnostics.every((message) => message.code != 'short-circuit'),
       bulbLit: bulb != null && current > 0.01,
       resistorPowerWatts: resistorPower,
+      netCount: graph.nets.length,
+      branchCount: graph.branches.length,
+      energizedComponentIds: energized,
+      branchCurrents: branchCurrents,
       diagnostics: diagnostics,
     );
   }
 
-  CircuitComponent? _first(CircuitProject project, ComponentType type) {
-    for (final component in project.components) {
+  SimulationSnapshot _snapshot({
+    required bool running,
+    required CircuitGraph graph,
+    required List<DiagnosticMessage> diagnostics,
+    double supplyVoltage = 0,
+  }) {
+    return SimulationSnapshot(
+      running: running,
+      loopClosed: false,
+      supplyVoltage: supplyVoltage,
+      totalResistance: 0,
+      currentAmps: 0,
+      ledForwardVoltage: 0,
+      ledLit: false,
+      bulbLit: false,
+      resistorPowerWatts: 0,
+      netCount: graph.nets.length,
+      branchCount: graph.branches.length,
+      energizedComponentIds: const <String>{},
+      branchCurrents: const <String, double>{},
+      diagnostics: diagnostics,
+    );
+  }
+
+  double _pathResistance(CircuitPath path) {
+    var resistance = 0.0;
+    for (final branch in path.branches) {
+      resistance += _branchResistance(branch);
+    }
+    return resistance;
+  }
+
+  double _branchResistance(GraphBranch branch) {
+    return _componentResistance(branch.component);
+  }
+
+  double _componentResistance(CircuitComponent component) {
+    switch (component.type) {
+      case ComponentType.resistor:
+      case ComponentType.variableResistor:
+      case ComponentType.ldr:
+      case ComponentType.ntc:
+        return component.param('ohms', component.param('r25', 220));
+      case ComponentType.potentiometer:
+        return component.param('ohms', 10000) * math.max(0.05, component.param('position', 0.5));
+      case ComponentType.bulb:
+      case ComponentType.buzzer:
+        final voltage = component.param('ratedVoltage', 5);
+        final watts = math.max(component.param('watts', 0.5), 0.01);
+        return voltage * voltage / watts;
+      case ComponentType.dcMotor:
+        return component.param('coilOhms', 20);
+      case ComponentType.currentProbe:
+        return component.param('burdenOhms', 0.05);
+      case ComponentType.led:
+      case ComponentType.diode:
+      case ComponentType.zenerDiode:
+        return 0.1;
+      default:
+        return 0;
+    }
+  }
+
+  double _pathForwardDrop(CircuitPath path) {
+    var drop = 0.0;
+    for (final component in path.components) {
+      switch (component.type) {
+        case ComponentType.led:
+          drop += component.param('vf', 2.1);
+        case ComponentType.diode:
+          drop += component.param('vf', 0.7);
+        default:
+          break;
+      }
+    }
+    return drop;
+  }
+
+  CircuitComponent? _first(CircuitPath path, ComponentType type) {
+    for (final component in path.components) {
       if (component.type == type) {
         return component;
       }
