@@ -144,12 +144,12 @@ class CircuitProject {
   final Rect viewport;
 
   factory CircuitProject.seed() {
-    return CircuitProject(
+    return const CircuitProject(
       id: 'lesson-led-current-limit',
       name: 'LED 限流实验',
       version: 1,
-      viewport: const Rect.fromLTWH(0, 0, 720, 520),
-      components: const <CircuitComponent>[
+      viewport: Rect.fromLTWH(0, 0, 720, 520),
+      components: <CircuitComponent>[
         CircuitComponent(
           id: 'battery-1',
           type: ComponentType.battery,
@@ -190,7 +190,7 @@ class CircuitProject {
           position: Offset(226, 328),
         ),
       ],
-      wires: const <WirePath>[
+      wires: <WirePath>[
         WirePath(
           id: 'wire-top-left',
           points: <Offset>[Offset(150, 154), Offset(248, 154)],

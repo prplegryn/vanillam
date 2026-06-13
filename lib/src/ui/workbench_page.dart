@@ -314,13 +314,13 @@ class _WorkbenchPageState extends State<WorkbenchPage> with SingleTickerProvider
       context: context,
       showDragHandle: true,
       builder: (context) {
-        return SafeArea(
+        return const SafeArea(
           child: Padding(
-            padding: const EdgeInsets.fromLTRB(20, 0, 20, 24),
+            padding: EdgeInsets.fromLTRB(20, 0, 20, 24),
             child: Column(
               mainAxisSize: MainAxisSize.min,
               crossAxisAlignment: CrossAxisAlignment.start,
-              children: const <Widget>[
+              children: <Widget>[
                 Text(Strings.lessonTitle, style: TextStyle(fontSize: 20, fontWeight: FontWeight.w800)),
                 SizedBox(height: 10),
                 Text(Strings.lessonGoal),
@@ -515,7 +515,7 @@ class _ComponentDrawer extends StatelessWidget {
                 child: ListView.separated(
                   scrollDirection: Axis.horizontal,
                   itemCount: items.length,
-                  separatorBuilder: (_, _) => const SizedBox(width: 10),
+                  separatorBuilder: (_, __) => const SizedBox(width: 10),
                   itemBuilder: (context, index) => _ComponentTile(type: items[index], onAdd: onAdd),
                 ),
               )
@@ -523,7 +523,7 @@ class _ComponentDrawer extends StatelessWidget {
               Expanded(
                 child: ListView.separated(
                   itemCount: items.length,
-                  separatorBuilder: (_, _) => const SizedBox(height: 10),
+                  separatorBuilder: (_, __) => const SizedBox(height: 10),
                   itemBuilder: (context, index) => _ComponentTile(type: items[index], onAdd: onAdd, wide: true),
                 ),
               ),

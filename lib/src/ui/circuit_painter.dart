@@ -159,7 +159,11 @@ class CircuitScenePainter extends CustomPainter {
       size: 16,
       align: TextAlign.center,
     );
-    _drawTerminalDots(canvas, rect.leftCenter, rect.rightCenter);
+    _drawTerminalDots(
+      canvas,
+      Offset(rect.left, rect.center.dy),
+      Offset(rect.right, rect.center.dy),
+    );
   }
 
   void _paintGround(Canvas canvas, CircuitComponent component) {
@@ -217,7 +221,11 @@ class CircuitScenePainter extends CustomPainter {
       size: 12,
       align: TextAlign.center,
     );
-    _drawTerminalDots(canvas, rect.leftCenter, rect.rightCenter);
+    _drawTerminalDots(
+      canvas,
+      Offset(rect.left, rect.center.dy),
+      Offset(rect.right, rect.center.dy),
+    );
   }
 
   void _paintLed(Canvas canvas, CircuitComponent component) {
