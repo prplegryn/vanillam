@@ -155,7 +155,8 @@ class CircuitSimulator {
 
     final resistance = _pathResistance(path);
     final fixedDrop = _pathForwardDrop(path);
-    final current = resistance <= 0.5 ? source.voltage / 0.5 : math.max(0, (source.voltage - fixedDrop) / resistance);
+    final double current =
+        resistance <= 0.5 ? source.voltage / 0.5 : math.max(0.0, (source.voltage - fixedDrop) / resistance);
     final energized = path.components.map((component) => component.id).toSet();
     final branchCurrents = <String, double>{
       for (final branch in path.branches) branch.component.id: current,
@@ -163,7 +164,7 @@ class CircuitSimulator {
     final led = _first(path, ComponentType.led);
     final resistor = _first(path, ComponentType.resistor) ?? _first(path, ComponentType.variableResistor);
     final bulb = _first(path, ComponentType.bulb);
-    final resistorPower = resistor == null ? 0 : current * current * _componentResistance(resistor);
+    final double resistorPower = resistor == null ? 0.0 : current * current * _componentResistance(resistor);
 
     if (resistance <= 0.5) {
       diagnostics.add(
